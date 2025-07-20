@@ -1,0 +1,434 @@
+---
+title: "ETC3550 Retail Project"
+author: Duy Le (32458495)
+date: "`r Sys.Date()`"
+output: 
+  html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, eval = TRUE, warning = FALSE, message = FALSE, error = FALSE, tidy.opts = list(width.cutoff = 60), tidy = TRUE, fig.align = 'center')
+```
+
+```{r lib,  message = FALSE}
+library(tidyverse)
+library(broom)
+library(fpp3)
+# Student ID as the seed
+set.seed(32458495)
+
+```
+
+## Preparing the data
+
+```{r data-prep}
+# Student ID as the seed
+set.seed(32458495)
+
+myseries <- aus_retail |>
+  # Remove discontinued series
+  filter(!(`Series ID` %in% c("A3349561R","A3349883F","A3349499L","A3349902A",
+                        "A3349588R","A3349763L","A3349372C","A3349450X",
+                        "A3349679W","A3349378T","A3349767W","A3349451A"))) |>
+  # Select a series at random
+  filter(`Series ID` == sample(`Series ID`,1))
+
+# To learn about the obtained data
+glimpse(myseries)
+
+
+```
+
+### Analyzing the data
+
+```{r ts-plot}
+autoplot(myseries) + 
+    labs (y = "$ AUD (millions)", title = "Nothern Territory Australian food retailing trade turnover")
+```
+Overall there seems to be an upward trend between 1988 and 2019. However, around 1997 and 2000, there is a slight decrease in turnover. Furthermore, we can see that there is a sudden drop at the start of each year, showing a seasonality pattern which we can use for forecasting. The plot does not seem to show any cyclic behavior. The variation in the seasonal pattern also seems to increase as the level of the series rises.
+
+```{r ts-season}
+gg_season(myseries, labels = "both") +
+  labs (y = "$ AUD (millions)", title = "Seasonal plot: Nothern Territory Australian food retailing trade turnover")
+
+```
+From the season plot, we can identify that there is indeed a slight decrease during January-February every year. It can also be seen that around the period 1988 - 2003, there seems to be an increasing trend until reaching peak at around July-August every year. However, this is shown most apparent as time goes, specifically during the 2006-2019, which can be seen that turnover usually peak at July every year and decrease after that.
+
+
+```{r ts-subseries}
+gg_subseries(myseries)  +
+  labs(y = "$ AUD (millions)", title = "Subseries plot: Nothern Territory Australian food retailing trade turnover")
+
+```
+According to the subseries plot, we can verify that most of our observation for the previous plot are identical to this: small decrease during start of the year, increasing after and likely to peak around July then slowly decrease after.
+
+
+```{r ts-acfpacf}
+myseries |>
+  ACF(Turnover, lag_max = 48) |>
+  autoplot() +
+  labs(title = "Nothern Territory Australian food retailing trade turnover")
+
+myseries |>
+  gg_tsdisplay(Turnover, plot_type = "partial")
+
+```
+
+From the ACF, we can see that there is a slow decay of significant positive values, indicating that this is indeed a trend series, and through the zoomed ACF plot, we can see that there are local increases at lag 12, 24, 36,..., which might indicate a series with yearly seasonality
+
+From the PACF, we can see that there are significant spikes at lags 7, 13, 19 and 25, but the spike at 19 seems to be less significant compared to one at 7. We might lean more towards to the plot suggesting a yearly seasonality rather than a half-yearly seasonality.
+
+## Transforming and Differencing
+
+```{r ts-transform}
+log_plot <- myseries |>
+  autoplot(log(Turnover)) +
+  labs(y = "",
+       title = "Transformed Turnover with log")
+
+boxcox_plot1 <- myseries |>
+  autoplot(box_cox(Turnover, -0.1)) +
+  labs(y = "",
+       title = "Transformed Turnover with lambda = -0.1")
+
+boxcox_plot2 <- myseries |>
+  autoplot(box_cox(Turnover, 0.1)) +
+  labs(y = "",
+       title = "Transformed Turnover with lambda = 0.1")
+
+log_plot
+boxcox_plot1
+boxcox_plot2
+
+# Guerrero method 
+lambda <- myseries |>
+  features(Turnover, features = guerrero) |>
+  pull(lambda_guerrero)
+
+gu_plot <- myseries |>
+  autoplot(box_cox(Turnover, lambda)) +
+  labs(y = "",
+       title = paste0("Transformed Turnover with Guerrero lambda = ", round(lambda,3)))
+
+gu_plot
+
+
+```
+
+For transformation, we want to perform a Box-Cox transformation that can minimize and keep the variation constant across the series, while also close to log (lambda = 0) to keep it simple. To choose a lambda value that can do so, we are going to use Guerrero's method and testing out lambda value of 0 (log), 0.1 and -0.1. 
+
+From the observation of transformed plots, we can see that the positive value from 0.1 to 0 (log transformation) seems to show a decent transformation with both lower and higher level of series. 
+
+However, we also try lambda = -0.1, which seems the show better variation for both lower and higher level of series, therefore our selection can be -0.1. Guerrero's method also generated a lambda approximately of -0.062, which is fairly close to our observation as well, so a range of -0.1 to -0.05 should do the transformation decently enough to help us modeling.
+
+Since Guerrero method value is computed optimally through algorithms and it is close to our suggested lambda, we will use the Guerrero lambda value for continuing parts.
+
+
+```{r ts-unit}
+myseries |> 
+  features(box_cox(Turnover,lambda), unitroot_kpss)
+
+myseries |> 
+  features(box_cox(Turnover,lambda), unitroot_nsdiffs)
+```
+
+The unit-root test for our transformed data suggests that they are not stationary, hence, differencing process is likely required. Seasonal differencing unit-root test result seems to suggest that we should do 1 seasonal difference.
+
+
+```{r ts-unit1}
+myseries |> 
+  features(difference(box_cox(Turnover,lambda), 12), unitroot_kpss)
+
+myseries |> 
+  features(difference(box_cox(Turnover,lambda), 12), unitroot_ndiffs)
+
+```
+
+Unit-root test after a seasonal differencing seems to indicate that our series is now stationary with these transformation and differencing, which is shown by our p-value > 0.05. 
+
+We also run another unit-root test for number of first differences but the result seems to suggest no first differencing is needed for our transformed and seasonal differenced time series.
+
+```{r}
+sdiff_series <- myseries |> 
+  gg_tsdisplay(difference(box_cox(Turnover,lambda), 12), plot_type = "partial") + labs(title = "Seasonally differenced time series")
+sdiff_series
+```
+
+The rapid decrease shown in ACF plot seems to suggest that our time series is relatively stationary now.
+
+# ETS modeling
+
+Initially, our analysis on original time series identifies that there is trend and seasonality, but we can also identify that:
+
+* The variation in the seasonal pattern increases as the level of the series rises. 
+* Overall trend seems to be upward and smooth. 
+
+Therefore, it seems to be logical to use multiplicative seasonal and additive or damped additive trend for our ETS model.
+
+Hence, from these factor, we can select out few assumptions for our ETS model:
+
+* ETS(M, A, M): Multiplicative Error, Additive Trend and Multiplicative Season
+* ETS(M, Ad, M): Multiplicative Error, Additive Damped Trend and Multiplicative Season
+* ETS(A, A, M): Additive Error, Additive Trend and Multiplicative Season
+
+We will fit to all these model and 1 auto model using ETS() and check their accuracies using 24-month test set.
+
+```{r data-split}
+#Splitting data
+myseries_train <- myseries |>
+  filter(Month <= max(Month) - 24)
+
+myseries_test <- myseries |>
+  filter(Month > max(Month) - 24)
+
+```
+
+
+```{r ts-ETS}
+myseries_train |>
+  model(ETS_a = ETS(Turnover ~ error("M") + trend("A") + season("M")),
+        ETS_ad = ETS(Turnover ~ error("M") + trend("Ad") + season("M")), 
+        ETS_a_ad = ETS(Turnover ~ error("A") + trend("A") + season("M")),
+        ETS_auto = ETS(Turnover)) |>
+  forecast(h = "24 months") |>
+  accuracy(myseries_test) |>
+  group_by(.model)
+
+```
+
+The accuracy result seems to show that, in term of RMSE, the automatic ETS model and the Additive Dampened Trend ETS Model seems to be similar (in other statistics as well), while Additive Trend ETS model seems to come close. Therefore, we can select the auto model and check its parameter for trend dampening.
+
+```{r report-ets}
+ETS_a <- myseries_train |> 
+  model(ETS(Turnover ~ error("M") + trend("A") + season("M")))
+
+glance(ETS_a) |>
+  select(AIC, AICc, BIC)
+
+ETS_final <- myseries_train |> 
+  model(ETS(Turnover)) 
+  
+report(ETS_final)
+
+```
+
+Additive and Additive Dampened Trend model in sequence, we can see that AIC and AICc score of Additive Dampened trend ETS model is lower, combining with other accuracy values are also better from the accuracy table, it is relatively safe to assume the Ad trend ETS model is most considerable. 
+
+Our auto ETS(M,Ad,M) model seems to have alpha = 0.546, beta = 0.016 and phi = 0.980 for Ad smoothing parameter.
+
+```{r}
+ETS_final |> gg_tsresiduals() + labs(title="ETS model residual")
+
+ETS_final |> forecast(h = "24 months") |> hilo() |> select(Month, ".mean", "80%")
+
+ETS_final |> 
+  augment() |>
+  features(.innov, ljung_box, lag = 24)
+
+ETS_final |> 
+  forecast(h = "24 months") |>
+  autoplot(myseries) + labs(y= "$AUD (million)", title = "Forecasted using automated ETS(M,Ad,M) model and comparison against test set ")
+
+
+```
+
+However, checking our residual plot, we can identify few problems:
+
+* The ACF plots shows that there are significant lags, as well as residuals do not shown to be white noise. There also exists strong positive auto-correlations at lag 3 and 12, along with few significant negative auto-correlations at around lag 4, 16 and 19.
+* Histogram seems to be quite right-tailed
+* Ljung-Box result shows a very small p-value, under 5%, which indicates that the residuals are distinguishable from a white-noise series, and we can also see that from our residual analysis.
+
+Hence when forecasting using this ETS model, we might need to be careful on forecasting value as there might be correlation when forecasting. Overall, from forecasted plot, we can see that it forecasts fairly accurate comparing with considerable prediction interval comparing to the test set.
+
+
+## ARIMA modeling
+
+For ARIMA modeling, we are gonna look at our transformed and differenced time series to determine few ARIMA models for our time series data. Our previously unit root test says that there is no need for further differencing, even though it is not obvious that we should do a further differencing or not but we will keep using the seasonally differenced data to choose ARIMA models.
+
+PACF shows a significant spike at lag 12 but nothing at seasonal lags in the ACF. This might suggests a seasonal AR(1) term. In the non-seasonal lags, we can see that there are 2 significant spikes in the PACF, suggesting a possible AR(2) term.
+
+Therefore, our 3 possible ARIMA models can be:
+
+* ARIMA(2,0,0)(1,1,0)[12] as starting point
+* ARIMA(2,0,1)(1,1,1)[12]
+* ARIMA(2,0,1)(1,1,0)[12]
+
+We will also run a stepwise and 1 wider search using ARIMA() function to find more possible model.
+
+
+
+```{r recall-sdiff}
+arima_fit <- myseries_train |>
+  model(arima1 = ARIMA(box_cox(Turnover,lambda) ~ 0 + pdq(2,0,0) + PDQ(1,1,0)),
+        arima2 = ARIMA(box_cox(Turnover,lambda) ~ 0 + pdq(2,0,1) + PDQ(1,1,1)),
+        arima3 = ARIMA(box_cox(Turnover,lambda) ~ 0 + pdq(2,0,1) + PDQ(1,1,0)),
+        arima_step = ARIMA(box_cox(Turnover,lambda)),
+        arima_search = ARIMA(box_cox(Turnover,lambda), stepwise = FALSE))
+
+arima_fit |> pivot_longer(!c(State, Industry), names_to = "Model name", values_to = "Orders")
+```
+```{r glance-data}
+glance(arima_fit) |> arrange(AICc) |> select(.model:BIC)
+```
+```{r glance-accuracy}
+arima_fit |> forecast(h = "24 months") |> accuracy(myseries_test) |> group_by(.model)
+```
+
+Overall, we can see that search algorithm of ARIMA() result in the best AIC, AICc and BIC value, with our guess of ARIMA(2,0,1)(1,1,1)[12] coming quite close, and Stepwise model is the second best.
+
+However, accuracy table when forecasting against test set shows that stepwise model seems to be a better choice in term of RMSE as well as other statistic, with search model is the second best here, and our guess of ARIMA(2,0,1)(1,1,1)[12] also perform relatively quite compare to other 2 guess.
+
+We will use both search (ARIMA(4,0,0)(0,1,2)[12]) and stepwise model (ARIMA(1,0,2)(2,1,1)[12]) to check their residuals, ACF and Ljung-Box test.
+
+
+```{r arima-analysis}
+arima_fit |> select(arima_step) |> gg_tsresiduals() + labs(title="Stepwise model residual")
+arima_fit |> select(arima_search) |> gg_tsresiduals() + labs(title="Search model residual")
+
+arima_fit |> 
+  select(arima_step) |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = 6)
+
+arima_fit |> 
+  select(arima_search) |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = 6)
+
+
+```
+
+From both model residual plots and Ljung-Box test, we can confidently choose Search model (ARIMA(4,0,0)(0,1,2)[12]) as selection for ARIMA model as Stepwise model did not satisfy Ljung-Box test. Although Stepwise model residual seems to be similar to Search model in term of Histogram and ACF plot (with a few more insignificant lag than Search model), Ljung-Box test seems solidify our model as it satisfies the condition of p-value > 0.05 to be not distinguishable from a white noise series.
+
+```{r arima-test}
+arima_final <- arima_fit |> 
+  select(arima_search)
+
+arima_final |> forecast(h = "24 months") |> hilo() |> select(Month, ".mean", "80%")
+
+myseries_train |> 
+  model(arima_search = ARIMA(box_cox(Turnover,lambda) ~ 0 + pdq(4,0,0) + PDQ(0,1,2))) |> 
+  forecast(h = "24 months") |>
+  autoplot(myseries) + labs(y= "$AUD (million)", title = "Forecasted using searched ARIMA(4,0,0)(0,1,2)[12] model against test set")
+
+
+```
+
+## ETS vs ARIMA
+
+Overall, both selected ETS and ARIMA model seems to perform relatively well against our 24-month test set, but ARIMA model prediction interval seems to lean towards increasing side, following the trend more, comparing to ETS model prediction interval, which covers both possible increasing trend and no trend factor. ETS model line also seems to fit better against test set line compared to ARIMA model line. On the other hand, if we take residual analysis into consideration, selected ARIMA model is likely to be better than ETS model. 
+
+However, one test set might not be enough to determine the viability of these 2 models. Hence, further comparison using more data is needed to see which model performs better.
+
+## Applying model to full dataset
+```{r full-apply}
+fc_arima <- myseries |> 
+  model(arima_search = ARIMA(box_cox(Turnover,lambda) ~ 0 + pdq(4,0,0) + PDQ(0,1,2))) |> 
+  forecast(h = "24 months") |>
+  autoplot(myseries) + labs(y= "$AUD (million)", title = "Forecasted using searched ARIMA(4,0,0)(0,1,2)[12] model")
+
+fc_ets <- myseries |> 
+  model(ETS_ad = ETS(Turnover ~ error("M") + trend("Ad", alpha = 0.546, beta = 0.016, phi = 0.980) + season("M"))) |> 
+  forecast(h = "24 months") |>
+  autoplot(myseries) + labs(y= "$AUD (million)", title = "Forecasted using ETS(M,Ad,M) w/ Ad parameters model")
+
+fc_arima
+myseries |> 
+  model(arima_search = ARIMA(box_cox(Turnover,lambda) ~ 0 + pdq(4,0,0) + PDQ(0,1,2))) |> 
+  forecast(h = "24 months") |> 
+  hilo() |> 
+  select(Month, ".mean", "80%")  |>
+  rename("Forecasted Mean" = .mean)
+
+fc_ets
+myseries |> 
+  model(ETS_ad = ETS(Turnover ~ error("M") + trend("Ad", alpha = 0.546, beta = 0.016, phi = 0.980) + season("M"))) |> 
+  forecast(h = "24 months") |> 
+  hilo() |> 
+  select(Month, ".mean", "80%")  |>
+  rename("Forecasted Mean" = .mean)
+
+
+```
+
+## Comparing to ABS data
+
+```{r load-abs}
+ABS_data <- readxl::read_excel("8501011.xlsx", sheet = "Data1", skip = 9) |>
+  select(Month = "Series ID", Turnover = myseries$"Series ID"[1]) |>
+  mutate(
+    Month = yearmonth(Month),
+    State = myseries$State[1],
+    Industry = myseries$Industry[1]
+  ) |>
+  as_tsibble(index = Month, key = c(State, Industry))
+```
+ABS data ends at March 2023, while our dataset ends at Dec 2018, hence, we should produce forecast 4 years 3 months ahead with our model.
+
+
+```{r fc-abs_ets}
+myseries |> 
+  model(ETS_ad = ETS(Turnover ~ error("M") + trend("Ad", alpha = 0.546, beta = 0.016, phi = 0.980) + season("M"))) |> 
+  forecast(h = "4 years 3 months") |>
+  autoplot(ABS_data) + labs(y = "$AUD (million)", title = "Forecasted using ETS model against ABS data")
+
+```
+
+```{r ets-number}
+ets_df <- myseries |> 
+  model(ETS_ad = ETS(Turnover ~ error("M") + trend("Ad", alpha = 0.546, beta = 0.016, phi = 0.980) + season("M"))) |> 
+  forecast(h = "4 years 3 months") |>
+  hilo() |> 
+  select(Month, .mean)
+
+left_join(ets_df, ABS_data |> select(Month, Turnover), 
+          by = join_by(Month)) |> 
+  tail(12)  |>
+  mutate("Difference" = .mean - Turnover) |>
+  rename("Forecasted Mean" = .mean)
+
+```
+
+
+```{r fc_abs_arima}
+myseries |> 
+  model(arima_search = ARIMA(box_cox(Turnover,lambda) ~ 0 + pdq(4,0,0) + PDQ(0,1,2))) |> 
+  forecast(h = "4 years 3 months") |>
+  autoplot(ABS_data) + labs(y = "$AUD (million)", title = "Forecasted using ARIMA model against ABS data")
+
+```
+
+
+```{r arima-number}
+arima_df <- myseries |> 
+  model(arima_search = ARIMA(box_cox(Turnover,lambda) ~ 0 + pdq(4,0,0) + PDQ(0,1,2))) |> 
+  forecast(h = "4 years 3 months") |>
+  hilo() |> 
+  select(Month, .mean)
+
+left_join(arima_df, ABS_data |> select(Month, Turnover), 
+          by = join_by(Month)) |> 
+  tail(12) |>
+  mutate("Difference" = .mean - Turnover) |>
+  rename("Forecasted Mean" = .mean)
+
+
+```
+
+Each table is corresponded to the model of the forecasted plot above them.
+
+Overall, our ARIMA model seems to forecast quite accurate to ABS data and the forecasted value seems quite close to real value with little difference. On the other hand, ETS model seems to forecast lower than ABS value, and it is consistently forecasting lower. 
+
+This might be a problem due to the dampening trend factor of ETS model, as well as our analysis also mentioned about correlation when forecast, which causes the forecast value of ETS model to not following the trend. One redemption point for ETS model is that ABS data line still stays within the prediction interval of ETS model.
+
+## Conclusion
+
+Our ARIMA model seems to perform decently with this release of ABS data, given that it is still relevant after more than 4 years of forecast from our dataset cutoff, this model could be viable for future predictions unless there are anomalies such as economical changes that leads to data going different way.
+
+On the other hand, the ETS model seems to perform worse when initially, the forecasted mean seems to be more close to test set than ARIMA model. However, when we perform the residual analysis and tests of ETS model, this is also within my expectation that the model will perform worse later.
+
+Furthermore, most of our model forecast tests and accuracy measuring were conducted using 1 24-month test set only. It is indeed costing less computational power to perform tests and model comparisons this way. However, cross-validation process should have been done when training these models as well, but this process will cost more computational power when we perform cross-validation with high output dimension.
+
+Our ETS model was also fitted using training data without transformation, so this could perhaps be a solution to get better model later, but it is not certain. This will require more testing outside of this report. Cross-validation might have resulted in better ETS model as well, we need further testing on this as well.
+
+
